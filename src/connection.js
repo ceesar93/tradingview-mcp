@@ -72,6 +72,10 @@ export async function connect() {
       targetInfo = target;
       client = await CDP({ host: CDP_HOST, port: CDP_PORT, target: target.id });
 
+      // Reset state on CDP disconnect or error so getClient() reconnects on next call
+      client.on('disconnect', () => { client = null; targetInfo = null; });
+      client.on('error', () => { client = null; targetInfo = null; });
+
       // Enable required domains
       await client.Runtime.enable();
       await client.Page.enable();

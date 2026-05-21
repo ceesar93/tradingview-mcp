@@ -85,6 +85,11 @@ registerUiTools(server);
 registerPaneTools(server);
 registerTabTools(server);
 
+// Keep process alive if TV crashes mid-call — log the rejection, don't crash
+process.on('unhandledRejection', (reason) => {
+  process.stderr.write(`[MCP] Unhandled rejection (TV may have crashed): ${reason}\n`);
+});
+
 // Startup notice (stderr so it doesn't interfere with MCP stdio protocol)
 process.stderr.write('⚠  tradingview-mcp  |  Unofficial tool. Not affiliated with TradingView Inc. or Anthropic.\n');
 process.stderr.write('   Ensure your usage complies with TradingView\'s Terms of Use.\n\n');
