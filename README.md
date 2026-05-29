@@ -268,7 +268,7 @@ Read `line.new()`, `label.new()`, `table.new()`, `box.new()` output from any vis
 | `tab_list` | List open chart tabs |
 | `tab_new` / `tab_close` | Open/close tabs |
 | `tab_switch` | Switch to a tab by index (visual only) |
-| `target_switch` | Reconnect MCP CDP WebSocket to a different tab. Hardcoded shortcuts: `"spy"` → `H7EMZPnd`, `"btc"` → `7SqnggXP`. Falls back to symbol eval for other values. |
+| `target_switch` | Reconnect MCP CDP WebSocket to a different tab. Hardcoded shortcuts: `"spy"` → `41gFmdJV`, `"btc"` → `7SqnggXP`. Falls back to symbol eval for other values. |
 
 ### Pine Script Development
 

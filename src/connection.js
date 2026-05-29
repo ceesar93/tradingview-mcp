@@ -121,7 +121,7 @@ async function findChartTarget() {
   if (tvTargets.length === 1) return tvTargets[0];
 
   // Prefer known SPY day-trading layout by chart ID, then fall back to first SPY tab
-  const preferred = tvTargets.find(t => t.url.includes('H7EMZPnd'));
+  const preferred = tvTargets.find(t => t.url.includes('41gFmdJV'));
   if (preferred) return preferred;
 
   for (const t of tvTargets) {
@@ -185,7 +185,7 @@ export async function switchTarget(symbolFragment) {
 
   // Prefer known chart IDs before falling back to symbol eval
   const CHART_IDS = {
-    spy: 'H7EMZPnd',
+    spy: '41gFmdJV',
     btc: '7SqnggXP',
   };
   const knownId = CHART_IDS[symbolFragment.toLowerCase()];
