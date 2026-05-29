@@ -183,6 +183,26 @@ export async function switchTarget(symbolFragment) {
   const targets = await resp.json();
   const tvTargets = targets.filter(t => t.type === 'page' && /tradingview\.com\/chart/i.test(t.url));
 
+  // Prefer known chart IDs before falling back to symbol eval
+  const CHART_IDS = {
+    spy: 'H7EMZPnd',
+    btc: '7SqnggXP',
+  };
+  const knownId = CHART_IDS[symbolFragment.toLowerCase()];
+  if (knownId) {
+    const preferred = tvTargets.find(t => t.url.includes(knownId));
+    if (preferred) {
+      if (client) { try { await client.close(); } catch {} client = null; targetInfo = null; }
+      targetInfo = preferred;
+      client = await CDP({ host: CDP_HOST, port: CDP_PORT, target: preferred.id });
+      attachClientHandlers(client);
+      await client.Runtime.enable();
+      await client.Page.enable();
+      await client.DOM.enable();
+      return { success: true, target_id: preferred.id, symbol: symbolFragment.toUpperCase(), url: preferred.url };
+    }
+  }
+
   let match = null;
   const symbolMap = [];
 
