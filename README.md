@@ -267,7 +267,8 @@ Read `line.new()`, `label.new()`, `table.new()`, `box.new()` output from any vis
 |------|-------------|
 | `tab_list` | List open chart tabs |
 | `tab_new` / `tab_close` | Open/close tabs |
-| `tab_switch` | Switch to a tab by index |
+| `tab_switch` | Switch to a tab by index (visual only) |
+| `target_switch` | Reconnect MCP CDP WebSocket to a different tab by symbol/title fragment — all subsequent tool calls evaluate against that tab |
 
 ### Pine Script Development
 
