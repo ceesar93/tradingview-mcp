@@ -104,3 +104,12 @@ export async function switchTab({ index }) {
     throw new Error(`Failed to activate tab ${idx}: ${e.message}`);
   }
 }
+
+/**
+ * Reconnect the MCP server's CDP WebSocket to a tab matching titleFragment.
+ * All subsequent MCP tool calls will evaluate against that tab.
+ */
+export async function switchTarget({ title }) {
+  const { switchTarget: connSwitch } = await import('../connection.js');
+  return connSwitch(title);
+}

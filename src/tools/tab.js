@@ -24,4 +24,15 @@ export function registerTabTools(server) {
     try { return jsonResult(await core.switchTab({ index })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
+
+  server.tool('target_switch',
+    'Reconnect the MCP server to a different TradingView tab by title. All subsequent tool calls will evaluate against that tab. Use tab_list to see available tab titles.',
+    {
+      title: z.string().describe('Partial tab title to match (case-insensitive). Example: "btc shadow practice". Use tab_list to see available titles.'),
+    },
+    async ({ title }) => {
+      try { return jsonResult(await core.switchTarget({ title })); }
+      catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+    }
+  );
 }

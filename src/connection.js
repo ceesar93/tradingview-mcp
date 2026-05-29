@@ -91,13 +91,44 @@ export async function connect() {
   throw new Error(`CDP connection failed after ${MAX_RETRIES} attempts: ${lastError?.message}`);
 }
 
+/**
+ * Query the active chart symbol on a specific CDP target.
+ * Opens a temporary connection, evals the symbol, then closes.
+ */
+async function getTabSymbol(targetId) {
+  let tabClient;
+  try {
+    tabClient = await CDP({ host: CDP_HOST, port: CDP_PORT, target: targetId });
+    await tabClient.Runtime.enable();
+    const result = await tabClient.Runtime.evaluate({
+      expression: `(function(){ try { return window.TradingViewApi._activeChartWidgetWV.value().symbol(); } catch(e) { return null; } })()`,
+      returnByValue: true,
+    });
+    return result.result?.value || null;
+  } catch {
+    return null;
+  } finally {
+    if (tabClient) try { await tabClient.close(); } catch {}
+  }
+}
+
 async function findChartTarget() {
   const resp = await fetch(`http://${CDP_HOST}:${CDP_PORT}/json/list`);
   const targets = await resp.json();
-  // Prefer targets with tradingview.com/chart in the URL
-  return targets.find(t => t.type === 'page' && /tradingview\.com\/chart/i.test(t.url))
-    || targets.find(t => t.type === 'page' && /tradingview/i.test(t.url))
-    || null;
+  const tvTargets = targets.filter(t => t.type === 'page' && /tradingview\.com\/chart/i.test(t.url));
+
+  if (tvTargets.length === 0) return null;
+  if (tvTargets.length === 1) return tvTargets[0];
+
+  // Prefer known SPY day-trading layout by chart ID, then fall back to first SPY tab
+  const preferred = tvTargets.find(t => t.url.includes('H7EMZPnd'));
+  if (preferred) return preferred;
+
+  for (const t of tvTargets) {
+    const symbol = await getTabSymbol(t.id);
+    if (symbol && symbol.toUpperCase().includes('SPY')) return t;
+  }
+  return tvTargets[0];
 }
 
 export async function getTargetInfo() {
@@ -134,6 +165,62 @@ export async function disconnect() {
     client = null;
     targetInfo = null;
   }
+}
+
+function attachClientHandlers(c) {
+  c.on('disconnect', () => { client = null; targetInfo = null; });
+  c.on('error', () => { client = null; targetInfo = null; });
+}
+
+/**
+ * Reconnect CDP WebSocket to a different tab by symbol fragment match.
+ * Evals the live symbol on each chart tab and picks the first match.
+ * All subsequent evaluate() calls will run against the new target.
+ * Example: switchTarget("btc") → matches BTCUSDT tab, switchTarget("spy") → matches SPY tab.
+ */
+export async function switchTarget(symbolFragment) {
+  const resp = await fetch(`http://${CDP_HOST}:${CDP_PORT}/json/list`);
+  const targets = await resp.json();
+  const tvTargets = targets.filter(t => t.type === 'page' && /tradingview\.com\/chart/i.test(t.url));
+
+  let match = null;
+  const symbolMap = [];
+
+  for (const t of tvTargets) {
+    const symbol = await getTabSymbol(t.id);
+    symbolMap.push({ target: t, symbol });
+    if (symbol && symbol.toLowerCase().includes(symbolFragment.toLowerCase())) {
+      match = t;
+      break;
+    }
+  }
+
+  if (!match) {
+    const available = symbolMap.map(s => `"${s.symbol || 'unknown'}"`).join(', ');
+    throw new Error(`No TradingView tab matching "${symbolFragment}". Available symbols: ${available}`);
+  }
+
+  if (client) {
+    try { await client.close(); } catch {}
+    client = null;
+    targetInfo = null;
+  }
+
+  targetInfo = match;
+  client = await CDP({ host: CDP_HOST, port: CDP_PORT, target: match.id });
+  attachClientHandlers(client);
+
+  await client.Runtime.enable();
+  await client.Page.enable();
+  await client.DOM.enable();
+
+  const matchedSymbol = symbolMap.find(s => s.target === match)?.symbol;
+  return {
+    success: true,
+    target_id: match.id,
+    symbol: matchedSymbol,
+    url: match.url,
+  };
 }
 
 // --- Direct API path helpers ---
