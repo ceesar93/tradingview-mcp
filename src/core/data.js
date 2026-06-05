@@ -326,6 +326,11 @@ export async function getStudyValues() {
     (function() {
       var chart = window.TradingViewApi._activeChartWidgetWV.value()._chartWidget;
       var model = chart.model();
+      // Clear crosshair so dataWindowView reads the latest bar, not wherever cursor is parked
+      try {
+        var pane = document.querySelector('[data-name="pane-canvas"]') || document.querySelector('canvas');
+        if (pane) pane.dispatchEvent(new MouseEvent('mouseleave', { bubbles: true, cancelable: true }));
+      } catch(e) {}
       var sources = model.model().dataSources();
       var results = [];
       for (var si = 0; si < sources.length; si++) {
