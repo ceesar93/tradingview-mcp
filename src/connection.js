@@ -187,6 +187,7 @@ export async function switchTarget(symbolFragment) {
   const CHART_IDS = {
     spy: '41gFmdJV',
     btc: '7SqnggXP',
+    scanner: '3MBbQtHb',
   };
   const knownId = CHART_IDS[symbolFragment.toLowerCase()];
   if (knownId) {
