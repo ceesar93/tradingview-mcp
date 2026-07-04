@@ -222,6 +222,7 @@ export async function launch({ port, kill_existing } = {}) {
   const child = spawn(tvPath, [`--remote-debugging-port=${cdpPort}`], { detached: true, stdio: 'ignore' });
   child.unref();
 
+  let cdpInfo = null;
   for (let i = 0; i < 15; i++) {
     await new Promise(r => setTimeout(r, 1000));
     try {
@@ -233,19 +234,50 @@ export async function launch({ port, kill_existing } = {}) {
           res.on('end', () => resolve(data));
         }).on('error', () => resolve(null));
       });
-      if (ready) {
-        const info = JSON.parse(ready);
-        return {
-          success: true, platform, binary: tvPath, pid: child.pid,
-          cdp_port: cdpPort, cdp_url: `http://localhost:${cdpPort}`,
-          browser: info.Browser, user_agent: info['User-Agent'],
-        };
-      }
+      if (ready) { cdpInfo = JSON.parse(ready); break; }
     } catch { /* retry */ }
   }
 
+  if (!cdpInfo) {
+    return {
+      success: true, platform, binary: tvPath, pid: child.pid, cdp_port: cdpPort, cdp_ready: false,
+      warning: 'TradingView launched but CDP not responding yet. It may still be loading. Try tv_health_check in a few seconds.',
+    };
+  }
+
+  // CDP responding is not the same as having a usable chart tab — TradingView
+  // Desktop does NOT auto-restore chart tabs after a hard kill (killFirst),
+  // it opens to a blank "New tab" until a human/agent reopens a chart. A prior
+  // version of this function returned success here unconditionally, which let
+  // a relaunch report success against a blank tab (data_get_study_values etc.
+  // then fail or hang against a page with no chart API).
+  let chartTabFound = false;
+  for (let i = 0; i < 10; i++) {
+    try {
+      const resp = await fetch(`http://localhost:${cdpPort}/json/list`);
+      const targets = await resp.json();
+      if (targets.some(t => t.type === 'page' && /tradingview\.com\/chart/i.test(t.url))) {
+        chartTabFound = true;
+        break;
+      }
+    } catch { /* retry */ }
+    await new Promise(r => setTimeout(r, 1000));
+  }
+
+  if (!chartTabFound) {
+    return {
+      success: true, platform, binary: tvPath, pid: child.pid,
+      cdp_port: cdpPort, cdp_url: `http://localhost:${cdpPort}`,
+      browser: cdpInfo.Browser, user_agent: cdpInfo['User-Agent'],
+      chart_tab_found: false,
+      warning: 'TradingView launched and CDP is up, but no chart tab was found after 10s. TradingView does not auto-restore chart tabs on relaunch — open a chart manually (or via tab_new/chart_set_symbol) before calling data tools, otherwise they will fail or hang against a blank tab.',
+    };
+  }
+
   return {
-    success: true, platform, binary: tvPath, pid: child.pid, cdp_port: cdpPort, cdp_ready: false,
-    warning: 'TradingView launched but CDP not responding yet. It may still be loading. Try tv_health_check in a few seconds.',
+    success: true, platform, binary: tvPath, pid: child.pid,
+    cdp_port: cdpPort, cdp_url: `http://localhost:${cdpPort}`,
+    browser: cdpInfo.Browser, user_agent: cdpInfo['User-Agent'],
+    chart_tab_found: true,
   };
 }
