@@ -113,7 +113,7 @@ scripts\launch_tv_debug.bat
 **Or use the MCP tool** (auto-detects your install):
 > "Use tv_launch to start TradingView in debug mode"
 
-**Known gotcha — TradingView does not auto-restore chart tabs after a hard kill.** The launch scripts `pkill`/`kill_existing` any running instance before relaunching, but TradingView Desktop opens to a blank "New tab" afterward — it does not reopen your previous chart tabs on its own. CDP responding on port 9222 only means the app process is up, not that a chart page exists; MCP tools that read chart data will fail (or, if called before the "no chart target" error surfaces, hang indefinitely) against a blank tab. `launch_tv_debug_mac.sh` now checks for an actual chart target (not just the CDP port) and exits non-zero with a clear error if none is found after relaunch — open a chart manually (or via `tab_new`/`chart_set_symbol`) before retrying MCP calls.
+**Known gotcha — TradingView does not auto-restore chart tabs after a hard kill.** The launch scripts `pkill`/`kill_existing` any running instance before relaunching, but TradingView Desktop opens to a blank "New tab" afterward — it does not reopen your previous chart tabs on its own. CDP responding on port 9222 only means the app process is up, not that a chart page exists; MCP tools that read chart data will fail against a blank tab. Both `launch_tv_debug_mac.sh` and the `tv_launch` MCP tool now check for an actual chart target (not just the CDP port) after relaunch — the script exits non-zero, and `tv_launch` returns `chart_tab_found: false` with a warning — instead of silently declaring success. Open a chart manually (or via `tab_new`/`chart_set_symbol`) before retrying MCP calls if you hit this.
 
 ### 3. Add to Claude Code
 
