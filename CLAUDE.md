@@ -116,7 +116,7 @@ These tools can return large payloads. Follow these rules to avoid context bloat
 - Entity IDs (from `chart_get_state`) are session-specific — don't cache across sessions
 - Pine indicators must be **visible** on chart for pine graphics tools to read their data
 - `chart_manage_indicator` requires **full indicator names**: "Relative Strength Index" not "RSI", "Moving Average Exponential" not "EMA", "Bollinger Bands" not "BB"
-- Screenshots save to `screenshots/` directory with timestamps
+- Screenshots save to `~/Documents/Trading/screenshots/` (moved out of this repo 2026-07-16), filenamed with timestamps
 - OHLCV capped at 500 bars, trades at 20 per request
 - Pine labels capped at 50 per study by default (pass `max_labels` to override)
 
