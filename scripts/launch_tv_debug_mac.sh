@@ -43,9 +43,24 @@ if [ -z "$APP" ] || [ ! -f "$APP" ]; then
   exit 1
 fi
 
-# Kill any existing TradingView
+# Kill any existing TradingView — verify it actually exited before relaunching.
+# A frozen/hung TradingView process can outlive a plain SIGTERM; a blind `sleep 1`
+# then proceeding to relaunch just hits Electron's single-instance lock, spawning
+# throwaway helper processes while the frozen main process survives untouched
+# (confirmed live 2026-07-16 — `ps aux` showed the original PID still running,
+# same uptime, after the script reported success).
 pkill -f "TradingView" 2>/dev/null
-sleep 1
+for i in $(seq 1 5); do
+  if ! pgrep -f "TradingView.app/Contents/MacOS/TradingView" > /dev/null 2>&1; then
+    break
+  fi
+  sleep 1
+done
+if pgrep -f "TradingView.app/Contents/MacOS/TradingView" > /dev/null 2>&1; then
+  echo "TradingView still running after SIGTERM after 5s — escalating to kill -9"
+  pkill -9 -f "TradingView.app/Contents/MacOS/TradingView" 2>/dev/null
+  sleep 1
+fi
 
 echo "Found TradingView at: $APP"
 echo "Launching with --remote-debugging-port=$PORT ..."

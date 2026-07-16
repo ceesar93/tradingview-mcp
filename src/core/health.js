@@ -212,11 +212,32 @@ export async function launch({ port, kill_existing } = {}) {
   }
 
   if (killFirst) {
-    try {
-      if (platform === 'win32') execSync('taskkill /F /IM TradingView.exe', { timeout: 5000 });
-      else execSync('pkill -f TradingView', { timeout: 5000 });
+    if (platform === 'win32') {
+      try { execSync('taskkill /F /IM TradingView.exe', { timeout: 5000 }); } catch { /* may not be running */ }
       await new Promise(r => setTimeout(r, 1500));
-    } catch { /* may not be running */ }
+    } else {
+      // Verify the process actually exited before relaunching — a frozen/hung
+      // TradingView can outlive a plain SIGTERM, and proceeding to relaunch
+      // while it's still alive just hits Electron's single-instance lock
+      // (confirmed live 2026-07-16: same bug reproduced via launch_tv_debug_mac.sh,
+      // `ps aux` showed the original PID still running after "success").
+      try { execSync('pkill -f TradingView', { timeout: 5000 }); } catch { /* may not be running */ }
+      const pgrepCmd = 'pgrep -f "TradingView.app/Contents/MacOS/TradingView"';
+      let dead = false;
+      for (let i = 0; i < 5; i++) {
+        await new Promise(r => setTimeout(r, 1000));
+        try {
+          execSync(pgrepCmd, { timeout: 2000 });
+        } catch {
+          dead = true;
+          break;
+        }
+      }
+      if (!dead) {
+        try { execSync('pkill -9 -f TradingView', { timeout: 5000 }); } catch { /* ignore */ }
+        await new Promise(r => setTimeout(r, 1000));
+      }
+    }
   }
 
   const child = spawn(tvPath, [`--remote-debugging-port=${cdpPort}`], { detached: true, stdio: 'ignore' });
