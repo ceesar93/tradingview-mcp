@@ -4,6 +4,14 @@
  *
  * Run: node --test tests/e2e.test.js
  *
+ * ⚠️ THIS SUITE MUTATES THE LIVE CHART. It calls chart_set_symbol, replay_start,
+ * replay_step and friends against whatever tab the CDP client attaches to. Do NOT
+ * run it (or `npm test`, which includes it) while a practice or live scan session
+ * is in progress — replay_start silently relocates an in-progress replay, which
+ * destroys that session's cursor. Near-miss 2026-07-26.
+ * For a safe check, run the unit suites only:
+ *   node --test tests/replay.test.js tests/cli.test.js tests/sanitization.test.js tests/pine_analyze.test.js
+ *
  * Coverage: 70+ tests across 12 tool modules
  * - Health & Connection (4 tools)
  * - Chart Control (8 tools)
