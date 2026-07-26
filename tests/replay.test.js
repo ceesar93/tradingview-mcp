@@ -41,15 +41,34 @@ function mockDeps(responses = {}, sequence) {
 
 // ── start() ──────────────────────────────────────────────────────────────
 
+/**
+ * Mock a replay that is NOT already running — the normal replay_start case.
+ * isReplayStarted is false for the pre-call probe (so priorDate is null) and true
+ * afterwards, which lets start() confirm the position on its first poll.
+ */
+function freshReplayMock(finalDate, extra = {}) {
+  let selected = false;
+  const calls = [];
+  const fn = async (expr) => {
+    calls.push(expr);
+    for (const [key, val] of Object.entries(extra)) {
+      if (expr.includes(key)) return typeof val === 'function' ? val() : val;
+    }
+    if (expr.includes('isReplayAvailable')) return true;
+    if (expr.includes('showReplayToolbar')) return undefined;
+    if (expr.includes('selectDate') || expr.includes('selectFirstAvailableDate')) { selected = true; return 'ok'; }
+    if (expr.includes('isReplayStarted')) return selected; // not running until selected
+    if (expr.includes('currentDate')) return selected ? finalDate : null;
+    return undefined;
+  };
+  fn.calls = calls;
+  return fn;
+}
+
 describe('start() — date selection and polling', () => {
   it('awaits selectDate with timestamp in ms for date param', async () => {
-    const { _deps, evaluate } = mockDeps({
-      'isReplayAvailable': true,
-      'showReplayToolbar': undefined,
-      'selectDate': 'ok',
-      'isReplayStarted': true,
-      'currentDate': 1773532799,
-    });
+    const evaluate = freshReplayMock(1773532799);
+    const _deps = { evaluate, getReplayApi: mockGetReplayApi() };
     const result = await start({ date: '2026-03-15', _deps });
     assert.equal(result.success, true);
     assert.equal(result.replay_started, true);
@@ -63,13 +82,8 @@ describe('start() — date selection and polling', () => {
   });
 
   it('calls selectFirstAvailableDate when no date given', async () => {
-    const { _deps, evaluate } = mockDeps({
-      'isReplayAvailable': true,
-      'showReplayToolbar': undefined,
-      'selectFirstAvailableDate': undefined,
-      'isReplayStarted': true,
-      'currentDate': 946684800,
-    });
+    const evaluate = freshReplayMock(946684800);
+    const _deps = { evaluate, getReplayApi: mockGetReplayApi() };
     const result = await start({ _deps });
     assert.equal(result.date, '(first available)');
     const firstAvail = evaluate.calls.find(c => c.includes('selectFirstAvailableDate'));
@@ -181,6 +195,129 @@ describe('step() — doStep and polling', () => {
       () => step({ _deps }),
       (err) => err.message.includes('not started'),
     );
+  });
+});
+
+// ── start() — stale position / displacing a running replay ───────────────
+//
+// Regression for the 2026-07-26 incident: replay_start() on an ALREADY-RUNNING
+// replay returned the pre-call position, because the poll broke on "currentDate
+// is non-null" and a running replay reports its old position for a moment after
+// selectDate(). The chart had moved; the tool said it hadn't.
+
+describe('start() — does not report the pre-call position', () => {
+  /** Replay already running at `oldDate`; moves to `newDate` after `lagPolls`. */
+  function runningReplayMock(oldDate, newDate, lagPolls) {
+    let selected = false;
+    let polls = 0;
+    return async (expr) => {
+      if (expr.includes('isReplayAvailable')) return true;
+      if (expr.includes('showReplayToolbar')) return undefined;
+      if (expr.includes('selectDate')) { selected = true; return 'ok'; }
+      if (expr.includes('isReplayStarted')) return true; // running the whole time
+      if (expr.includes('currentDate')) {
+        if (!selected) return oldDate;       // pre-call probe
+        return ++polls > lagPolls ? newDate : oldDate; // lags, then updates
+      }
+      return undefined;
+    };
+  }
+
+  it('waits out the lag and returns the NEW position', async () => {
+    const evaluate = runningReplayMock(1784914379, 1781098379, 2);
+    const result = await start({ date: '2026-06-10', _deps: { evaluate, getReplayApi: mockGetReplayApi() } });
+    assert.equal(result.current_date, 1781098379, 'must not return the pre-call position');
+    assert.equal(result.current_date_confirmed, true);
+  });
+
+  it('reports that it displaced an in-progress replay', async () => {
+    const evaluate = runningReplayMock(1784914379, 1781098379, 1);
+    const result = await start({ date: '2026-06-10', _deps: { evaluate, getReplayApi: mockGetReplayApi() } });
+    assert.equal(result.replaced_existing_replay, true);
+    assert.equal(result.previous_date, 1784914379, 'surfaces what was clobbered');
+  });
+
+  it('flags an unconfirmed position instead of hanging when the date never changes', async () => {
+    // Re-selecting the date replay is already on: currentDate legitimately never moves.
+    const evaluate = runningReplayMock(1784914379, 1784914379, 0);
+    const result = await start({ date: '2026-07-24', _deps: { evaluate, getReplayApi: mockGetReplayApi() } });
+    assert.equal(result.success, true);
+    assert.equal(result.current_date_confirmed, false, 'caller must know not to trust it');
+  });
+
+  it('confirms immediately when no replay was running', async () => {
+    const evaluate = freshReplayMock(1773532799);
+    const result = await start({ date: '2026-03-15', _deps: { evaluate, getReplayApi: mockGetReplayApi() } });
+    assert.equal(result.replaced_existing_replay, false);
+    assert.equal(result.previous_date, null);
+    assert.equal(result.current_date_confirmed, true);
+  });
+});
+
+// ── step() — mid-write bar settling ──────────────────────────────────────
+//
+// TradingView animates each revealed replay bar through 4 intra-bar phases. Phase 1
+// publishes o=h=l=c=open with volume = total/4, and currentDate() has already flipped
+// by then — so step() must wait for the bar itself, not just the date.
+// Confirmed live 2026-07-26: forming volume was exactly total/4 in every sample
+// (18604.5→74418, 17256.75→69027, 12686.5→50746).
+
+describe('step() — waits out the forming bar', () => {
+  /** evaluate mock that serves a forming bar for the first N last-bar reads. */
+  function barMock(formingReads, settledBar) {
+    let reads = 0;
+    let stepped = false;
+    const fn = async (expr) => {
+      if (expr.includes('isReplayStarted')) return true;
+      if (expr.includes('doStep')) { stepped = true; return undefined; }
+      if (expr.includes('currentDate')) return stepped ? 2000 : 1000;
+      if (expr.includes('mainSeries')) {
+        reads++;
+        // Phase 1: flat OHLC + quarter volume.
+        if (reads <= formingReads) {
+          return { time: 100, open: 733.55, high: 733.55, low: 733.55, close: 733.55,
+                   volume: settledBar.volume / 4 };
+        }
+        return settledBar;
+      }
+      return undefined;
+    };
+    fn.readCount = () => reads;
+    return fn;
+  }
+
+  const SETTLED = { time: 100, open: 733.55, high: 736.26, low: 733.5, close: 736.19, volume: 69027 };
+
+  it('polls past a forming bar and reports bar_settled', async () => {
+    const evaluate = barMock(3, SETTLED);
+    const result = await step({ _deps: { evaluate, getReplayApi: mockGetReplayApi() } });
+    assert.equal(result.bar_settled, true);
+    assert.ok(evaluate.readCount() > 3, 'should have re-read until the bar settled');
+  });
+
+  it('returns immediately when the bar is already settled', async () => {
+    const evaluate = barMock(0, SETTLED);
+    const result = await step({ _deps: { evaluate, getReplayApi: mockGetReplayApi() } });
+    assert.equal(result.bar_settled, true);
+    assert.equal(evaluate.readCount(), 1, 'no extra polling needed');
+  });
+
+  it('detects a flat bar whose quarter-volume happens to be an integer', async () => {
+    // total divisible by 4 → fractional-volume tell fails, flat-OHLC tell must catch it
+    const divisible = { ...SETTLED, volume: 69028 };
+    const evaluate = barMock(2, divisible);
+    const result = await step({ _deps: { evaluate, getReplayApi: mockGetReplayApi() } });
+    assert.equal(result.bar_settled, true);
+    assert.ok(evaluate.readCount() > 2);
+  });
+
+  it('does not stall when the bars path is unavailable', async () => {
+    // Unknown expressions return undefined — the pre-existing mocks all behave this way,
+    // so a null bar read must resolve rather than block until timeout.
+    const evaluate = mockEvaluate({ 'isReplayStarted': true, 'currentDate': 2000 });
+    const result = await step({ _deps: { evaluate, getReplayApi: mockGetReplayApi() } });
+    assert.equal(result.success, true);
+    assert.equal(result.bar_settled, null);
   });
 });
 

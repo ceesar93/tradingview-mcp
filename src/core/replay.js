@@ -16,6 +16,59 @@ function _resolve(deps) {
   };
 }
 
+const MAIN_SERIES_BARS =
+  'window.TradingViewApi._activeChartWidgetWV.value()._chartWidget.model().mainSeries().bars()';
+
+// Read the newest bar — bars.lastIndex() — as [time, o, h, l, c, volume].
+const LAST_BAR = `
+  (function() {
+    var bars = ${MAIN_SERIES_BARS};
+    if (!bars || typeof bars.lastIndex !== 'function') return null;
+    var v = bars.valueAt(bars.lastIndex());
+    return v ? {time: v[0], open: v[1], high: v[2], low: v[3], close: v[4], volume: v[5] || 0} : null;
+  })()
+`;
+
+/**
+ * Is this bar still being written by the replay engine?
+ *
+ * TradingView animates each newly-revealed replay bar through 4 intra-bar phases.
+ * Phase 1 publishes open===high===low===close with volume = total/4; the real OHLC
+ * lands ~1-2s later. Two independent tells (both confirmed by live probing 2026-07-26,
+ * where forming volume was exactly total/4 across every sample):
+ *   - flat bar   — open === high === low === close
+ *   - fractional volume — share volume is always a whole number, but total/4 usually isn't
+ *
+ * A false positive (a genuine doji whose volume happens to divide by 4) costs only the
+ * settle timeout and still returns correct data, so this errs safe by construction.
+ */
+function isBarForming(bar) {
+  if (!bar) return false; // can't tell — don't block
+  if (bar.volume % 1 !== 0) return true;
+  return bar.open === bar.high && bar.high === bar.low && bar.low === bar.close;
+}
+
+/**
+ * Poll until the newest bar has finished animating.
+ *
+ * Necessary because currentDate() flips at phase 1, so a step that returns on the date
+ * change alone hands back a half-written bar. Returns whether the bar settled; a null
+ * read (bars path unavailable) resolves immediately rather than stalling the step.
+ */
+async function waitForBarSettled(evaluate, { timeoutMs = 4000, intervalMs = 150 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let bar = null;
+  try { bar = await evaluate(LAST_BAR); } catch { return { settled: null, bar: null }; }
+  if (!bar) return { settled: null, bar: null };
+
+  while (isBarForming(bar) && Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, intervalMs));
+    try { bar = await evaluate(LAST_BAR); } catch { break; }
+    if (!bar) break;
+  }
+  return { settled: !isBarForming(bar), bar };
+}
+
 export async function start({ date, _deps } = {}) {
   const { evaluate, getReplayApi } = _resolve(_deps);
   const rp = await getReplayApi();
@@ -23,6 +76,24 @@ export async function start({ date, _deps } = {}) {
   if (!available) throw new Error('Replay is not available for the current symbol/timeframe');
 
   await evaluate(`${rp}.showReplayToolbar()`);
+
+  // Where was replay sitting before we move it? Two reasons this matters:
+  //  1. If a replay is ALREADY running, currentDate() keeps returning that old
+  //     position for a moment after selectDate() — so breaking the poll below on
+  //     "non-null" hands back the PREVIOUS position while the chart has already
+  //     moved. That makes an accidental relocation almost impossible to diagnose,
+  //     because the tool reports where you were, not where you now are.
+  //  2. A non-null value here means we are about to displace someone else's
+  //     in-progress replay (e.g. a live practice session on the practice tab).
+  //     Surfaced in the return so the caller can notice instead of silently
+  //     clobbering it. (Incident 2026-07-26: a diagnostic replay_start relocated
+  //     an active practice session and reported the old position back, which sent
+  //     the investigation looking for a TradingView bug that did not exist.)
+  let priorDate = null;
+  try {
+    const wasStarted = await evaluate(wv(`${rp}.isReplayStarted()`));
+    if (wasStarted) priorDate = await evaluate(wv(`${rp}.currentDate()`));
+  } catch { priorDate = null; }
 
   // selectDate() is async — it calls enableReplayMode() then _onPointSelected()
   // which initializes the server-side replay session. Must be awaited inside the
@@ -39,12 +110,22 @@ export async function start({ date, _deps } = {}) {
   // Poll until replay is fully initialized: isReplayStarted AND currentDate is set.
   // selectDate()'s promise resolves before the data series is ready, so we need
   // to wait for currentDate to become non-null before stepping will work.
+  //
+  // When a replay was already running (priorDate set), also wait for the value to
+  // actually CHANGE — otherwise we return the old position. Bounded separately,
+  // because re-selecting the date replay is already on legitimately never changes
+  // it, and that must not hang.
+  const CHANGE_WAIT_POLLS = 8; // ~2s
   let started = false;
   let currentDate = null;
+  let confirmed = false;
   for (let i = 0; i < 30; i++) {
     started = await evaluate(wv(`${rp}.isReplayStarted()`));
     currentDate = await evaluate(wv(`${rp}.currentDate()`));
-    if (started && currentDate !== null) break;
+    if (started && currentDate !== null) {
+      if (priorDate === null || currentDate !== priorDate) { confirmed = true; break; }
+      if (i >= CHANGE_WAIT_POLLS) break; // still stale — return it, but flag it
+    }
     await new Promise(r => setTimeout(r, 250));
   }
 
@@ -53,7 +134,17 @@ export async function start({ date, _deps } = {}) {
     throw new Error('Replay failed to start. The selected date may not have data for this timeframe. Try a more recent date or a higher timeframe (e.g., Daily).');
   }
 
-  return { success: true, replay_started: true, date: date || '(first available)', current_date: currentDate };
+  return {
+    success: true,
+    replay_started: true,
+    date: date || '(first available)',
+    current_date: currentDate,
+    // false = current_date may still be the pre-call position, do not trust it
+    current_date_confirmed: confirmed,
+    // non-null = an in-progress replay was displaced by this call
+    replaced_existing_replay: priorDate !== null,
+    previous_date: priorDate,
+  };
 }
 
 export async function step({ _deps } = {}) {
@@ -71,7 +162,14 @@ export async function step({ _deps } = {}) {
     currentDate = await evaluate(wv(`${rp}.currentDate()`));
     if (currentDate !== before) break;
   }
-  return { success: true, action: 'step', current_date: currentDate };
+
+  // currentDate flips at intra-bar phase 1, while the bar keeps animating for ~1-2s
+  // more. Without this second wait, an immediate data_get_ohlcv reads a flat bar with
+  // total/4 volume — and no `count` protects against it, since every pull ends at
+  // bars.lastIndex(). Waiting here fixes it once for every caller.
+  const { settled } = await waitForBarSettled(evaluate);
+
+  return { success: true, action: 'step', current_date: currentDate, bar_settled: settled };
 }
 
 export async function autoplay({ speed, _deps } = {}) {
