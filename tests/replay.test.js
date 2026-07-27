@@ -5,7 +5,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { start, step, autoplay, stop, trade, status, VALID_AUTOPLAY_DELAYS } from '../src/core/replay.js';
+import { start, step, autoplay, stop, trade, status, VALID_AUTOPLAY_DELAYS, DISMISS_REPLAY_PROMPT } from '../src/core/replay.js';
 
 // ── Mock helpers ─────────────────────────────────────────────────────────
 
@@ -318,6 +318,119 @@ describe('step() — waits out the forming bar', () => {
     const result = await step({ _deps: { evaluate, getReplayApi: mockGetReplayApi() } });
     assert.equal(result.success, true);
     assert.equal(result.bar_settled, null);
+  });
+});
+
+// ── start() — "Continue your last replay?" prompt ────────────────────────
+//
+// The prompt appears whenever replay mode is entered on a chart holding saved replay
+// state. It does not block the replay API, but it covers the chart, so screenshots and
+// UI clicks break until it is cleared (confirmed live 2026-07-26 on the practice tab).
+
+describe('start() — dismisses the "Continue your last replay?" prompt', () => {
+  const PROMPT_TEXT = 'Continue your last replay?';
+
+  function makeButton(label, kind) {
+    const b = { textContent: label, offsetParent: {}, kind, clicked: 0 };
+    b.click = () => { b.clicked++; };
+    return b;
+  }
+
+  /** A visible dialog whose buttons answer both selector queries the expression makes. */
+  function makeDialog(text, buttons) {
+    return {
+      textContent: text,
+      offsetParent: {},
+      querySelectorAll(sel) {
+        // Close X's are <button> too, so they appear in both lists — as in the real DOM.
+        return sel === 'button' ? buttons : buttons.filter(b => b.kind === 'close');
+      },
+    };
+  }
+
+  /** Run the injected page expression against a hand-rolled DOM (no jsdom dependency). */
+  function runDismiss(dialogs) {
+    const document = { querySelectorAll: () => dialogs };
+    // Parenthesized deliberately: the expression starts with a newline, and
+    // `return` + line break would trigger ASI and hand back undefined.
+    return new Function('document', `return (${DISMISS_REPLAY_PROMPT});`)(document);
+  }
+
+  it('prefers the close X over answering the question', async () => {
+    // Answering could resume the OLD replay position, overriding the selectDate() the
+    // caller just made. Closing dismisses without choosing, so it cannot move anything.
+    const close = makeButton('', 'close');
+    const cont = makeButton('Continue', 'button');
+    const r = runDismiss([makeDialog(PROMPT_TEXT, [close, cont])]);
+    assert.equal(r.clicked, true);
+    assert.equal(r.via, 'close');
+    assert.equal(close.clicked, 1);
+    assert.equal(cont.clicked, 0, 'must not answer the prompt when a close exists');
+  });
+
+  it('falls back to an affirmative button, never a cancel', async () => {
+    // "Cancel"/"No" can exit replay mode entirely — strictly worse than resuming at a
+    // date the caller is about to override anyway.
+    const cancel = makeButton('Cancel', 'button');
+    const cont = makeButton('Continue', 'button');
+    const r = runDismiss([makeDialog(PROMPT_TEXT, [cancel, cont])]);
+    assert.equal(r.via, 'affirmative');
+    assert.equal(cont.clicked, 1);
+    assert.equal(cancel.clicked, 0);
+  });
+
+  it('picks the tightest matching container, not the page shell wrapping it', async () => {
+    const inner = makeButton('Continue', 'button');
+    const outer = makeButton('Chart settings', 'button');
+    const shell = makeDialog(`app shell ... ${PROMPT_TEXT} ... lots more chrome`, [outer]);
+    const r = runDismiss([shell, makeDialog(PROMPT_TEXT, [inner])]);
+    assert.equal(inner.clicked, 1);
+    assert.equal(outer.clicked, 0, 'clicking the shell would hit an unrelated control');
+  });
+
+  it('ignores an invisible prompt and a dialog that is something else', async () => {
+    const hidden = makeDialog(PROMPT_TEXT, [makeButton('Continue', 'button')]);
+    hidden.offsetParent = null;
+    const unrelated = makeDialog('Are you sure you want to delete this alert?', [
+      makeButton('Delete', 'button'),
+    ]);
+    assert.equal(runDismiss([hidden, unrelated]).found, false);
+  });
+
+  it('reports the dismissal on the start() result', async () => {
+    const evaluate = freshReplayMock(1773532799, {
+      'continue your last replay': { found: true, clicked: true, via: 'close' },
+    });
+    const result = await start({ date: '2026-03-15', _deps: { evaluate, getReplayApi: mockGetReplayApi() } });
+    assert.equal(result.replay_prompt_dismissed, true);
+  });
+
+  it('reports false when no prompt was up', async () => {
+    const evaluate = freshReplayMock(1773532799, {
+      'continue your last replay': { found: false, clicked: false },
+    });
+    const result = await start({ date: '2026-03-15', _deps: { evaluate, getReplayApi: mockGetReplayApi() } });
+    assert.equal(result.replay_prompt_dismissed, false);
+    assert.equal(result.current_date, 1773532799, 'normal path still works');
+  });
+
+  it('stops clicking once dismissed', async () => {
+    let dismissCalls = 0;
+    const evaluate = freshReplayMock(1773532799, {
+      'continue your last replay': () => { dismissCalls++; return { found: true, clicked: true }; },
+    });
+    await start({ date: '2026-03-15', _deps: { evaluate, getReplayApi: mockGetReplayApi() } });
+    assert.equal(dismissCalls, 1, 'a second click could dismiss an unrelated later dialog');
+  });
+
+  it('still starts replay when the dismiss probe throws', async () => {
+    // Cleanup convenience must never take down an otherwise-working replay_start.
+    const evaluate = freshReplayMock(1773532799, {
+      'continue your last replay': () => { throw new Error('CDP detached'); },
+    });
+    const result = await start({ date: '2026-03-15', _deps: { evaluate, getReplayApi: mockGetReplayApi() } });
+    assert.equal(result.success, true);
+    assert.equal(result.replay_prompt_dismissed, false);
   });
 });
 

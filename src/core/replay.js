@@ -69,6 +69,81 @@ async function waitForBarSettled(evaluate, { timeoutMs = 4000, intervalMs = 150 
   return { settled: !isBarForming(bar), bar };
 }
 
+/**
+ * TradingView's "Continue your last replay?" prompt.
+ *
+ * Appears whenever replay mode is entered on a chart that still holds saved replay
+ * state. It does NOT block the replay API — start/step keep working underneath — but
+ * it sits on top of the chart, so anything screenshot- or UI-click-based breaks until
+ * it is cleared (confirmed live 2026-07-26 on the practice tab).
+ *
+ * Dismissed by a DOM .click() rather than ui_mouse_click coordinates, deliberately:
+ * screenshots on this Retina setup are 2x the CDP mouse-coordinate space, so a
+ * coordinate read off an image has to be halved before it lands. A DOM click needs no
+ * coordinates at all, so that whole class of error cannot occur. Same technique already
+ * used for the Pine "Save Script" dialog (pine.js).
+ */
+const REPLAY_PROMPT_NEEDLE = 'continue your last replay';
+
+export const DISMISS_REPLAY_PROMPT = `
+  (function() {
+    var NEEDLE = ${JSON.stringify(REPLAY_PROMPT_NEEDLE)};
+    var nodes = document.querySelectorAll(
+      '[role="dialog"], [data-dialog-name], [class*="dialog"], [class*="modal"], [class*="popup"]'
+    );
+    // Outer wrappers contain the text too, so take the TIGHTEST match — the smallest
+    // text payload is the actual prompt, not the page shell it is mounted in.
+    var dlg = null;
+    for (var i = 0; i < nodes.length; i++) {
+      var el = nodes[i];
+      if (el.offsetParent === null) continue; // not visible
+      var txt = (el.textContent || '').toLowerCase();
+      if (txt.indexOf(NEEDLE) === -1) continue;
+      if (!dlg || (el.textContent || '').length < (dlg.textContent || '').length) dlg = el;
+    }
+    if (!dlg) return { found: false, clicked: false };
+
+    function visible(b) { return b && b.offsetParent !== null; }
+    var btn = null, via = null;
+
+    // Prefer the close (X) control: it dismisses without ANSWERING the question, so it
+    // cannot resume the old replay position out from under the date we just selected.
+    var closes = dlg.querySelectorAll('[data-name="close"], button[aria-label*="lose"], [class*="close"]');
+    for (var j = 0; j < closes.length && !btn; j++) if (visible(closes[j])) { btn = closes[j]; via = 'close'; }
+
+    var btns = dlg.querySelectorAll('button');
+    // Then an affirmative button — it keeps replay mode ON. A "Cancel"/"No" could exit
+    // replay entirely, which is strictly worse than resuming at a date we then override.
+    for (var k = 0; k < btns.length && !btn; k++) {
+      if (visible(btns[k]) && /continue|resume|\\byes\\b|\\bok\\b/i.test(btns[k].textContent || '')) {
+        btn = btns[k]; via = 'affirmative';
+      }
+    }
+    for (var m = 0; m < btns.length && !btn; m++) if (visible(btns[m])) { btn = btns[m]; via = 'first'; }
+
+    if (!btn) return { found: true, clicked: false };
+    btn.click();
+    return { found: true, clicked: true, via: via, label: (btn.textContent || '').trim().slice(0, 40) };
+  })()
+`;
+
+/**
+ * Clear the replay prompt if it is up, once.
+ *
+ * Single-shot by design — the caller retries from inside the initialization poll it
+ * already runs, so covering the prompt's render delay costs no extra wall-clock.
+ *
+ * Never throws: this is convenience cleanup, and a failure here must not take down an
+ * otherwise-working replay_start. Returns null when it could not tell.
+ */
+async function dismissReplayPrompt(evaluate) {
+  try {
+    return await evaluate(DISMISS_REPLAY_PROMPT);
+  } catch {
+    return null;
+  }
+}
+
 export async function start({ date, _deps } = {}) {
   const { evaluate, getReplayApi } = _resolve(_deps);
   const rp = await getReplayApi();
@@ -76,6 +151,10 @@ export async function start({ date, _deps } = {}) {
   if (!available) throw new Error('Replay is not available for the current symbol/timeframe');
 
   await evaluate(`${rp}.showReplayToolbar()`);
+
+  // Cheap single look — the prompt sometimes precedes selectDate(). Retried from inside
+  // the initialization poll below, since enableReplayMode() is the likelier trigger.
+  let prompt = await dismissReplayPrompt(evaluate);
 
   // Where was replay sitting before we move it? Two reasons this matters:
   //  1. If a replay is ALREADY running, currentDate() keeps returning that old
@@ -116,10 +195,17 @@ export async function start({ date, _deps } = {}) {
   // because re-selecting the date replay is already on legitimately never changes
   // it, and that must not hang.
   const CHANGE_WAIT_POLLS = 8; // ~2s
+  const PROMPT_RETRY_POLLS = 6; // ~1.5s — covers the prompt's render delay
   let started = false;
   let currentDate = null;
   let confirmed = false;
   for (let i = 0; i < 30; i++) {
+    // Retry the prompt here rather than in its own polled loop: this loop is already
+    // sleeping, so the render delay is covered for free. Ordering also matters — the
+    // click lands before this loop confirms the date, so a click that DID disturb the
+    // position surfaces as current_date_confirmed:false instead of passing silently.
+    if (!prompt?.clicked && i < PROMPT_RETRY_POLLS) prompt = await dismissReplayPrompt(evaluate);
+
     started = await evaluate(wv(`${rp}.isReplayStarted()`));
     currentDate = await evaluate(wv(`${rp}.currentDate()`));
     if (started && currentDate !== null) {
@@ -127,6 +213,14 @@ export async function start({ date, _deps } = {}) {
       if (i >= CHANGE_WAIT_POLLS) break; // still stale — return it, but flag it
     }
     await new Promise(r => setTimeout(r, 250));
+  }
+
+  // The loop above breaks on its first iteration whenever init is already complete, which
+  // can easily beat the prompt to the screen. Bounded tail sweep so a late render still
+  // gets cleared; capped tight because this is dead time whenever no prompt ever appears.
+  for (let i = 0; i < 3 && !prompt?.clicked; i++) {
+    await new Promise(r => setTimeout(r, 200));
+    prompt = await dismissReplayPrompt(evaluate);
   }
 
   if (!started) {
@@ -144,6 +238,8 @@ export async function start({ date, _deps } = {}) {
     // non-null = an in-progress replay was displaced by this call
     replaced_existing_replay: priorDate !== null,
     previous_date: priorDate,
+    // true = TradingView's "Continue your last replay?" prompt was up and got cleared
+    replay_prompt_dismissed: !!prompt?.clicked,
   };
 }
 

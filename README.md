@@ -293,7 +293,7 @@ Read `line.new()`, `label.new()`, `table.new()`, `box.new()` output from any vis
 
 | Tool | Step |
 |------|------|
-| `replay_start` | Enter replay at a date |
+| `replay_start` | Enter replay at a date. Auto-clears TradingView's "Continue your last replay?" modal (`replay_prompt_dismissed`); reports `current_date_confirmed` and, if it displaced a running replay, `replaced_existing_replay` / `previous_date` |
 | `replay_step` | Advance one bar |
 | `replay_autoplay` | Auto-advance (set speed in ms) |
 | `replay_trade` | Buy/sell/close positions |
