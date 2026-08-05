@@ -10,7 +10,7 @@ export function registerReplayTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('replay_step', 'Advance one bar in replay mode. Waits for the revealed bar to finish forming before returning (TradingView animates each replay bar through 4 intra-bar phases), so a data_get_ohlcv straight afterwards reads settled values. Returns bar_settled:false if the bar never settled within the timeout — treat the newest bar as unreliable in that case.', {}, async () => {
+  server.tool('replay_step', 'Advance one bar in replay mode. Waits for the revealed bar to finish forming before returning (TradingView animates each replay bar through 4 intra-bar phases), so a data_get_ohlcv straight afterwards reads settled values. Returns bar_settled:false if the bar never settled within the timeout — treat the newest bar as unreliable in that case. Returns bar_revealed:false when the replay cursor advanced but NO new bar appeared — the chart has run out of revealed bars, further stepping cannot produce data, and the session should be ended; current_date still advances in this case, so it is not evidence of progress. bar_revealed:null means the bar count could not be read (unknown, not a stall).', {}, async () => {
     try { return jsonResult(await core.step()); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });

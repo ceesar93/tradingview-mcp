@@ -29,6 +29,28 @@ const LAST_BAR = `
   })()
 `;
 
+// How many bars the chart currently holds. In replay mode this is the count
+// REVEALED so far (future bars are masked), so a successful step increments it
+// by one — which is what makes it a reliable "did a bar actually appear" probe.
+// It is the same value data_get_ohlcv reports as `total_available`.
+const BAR_COUNT = `
+  (function() {
+    var bars = ${MAIN_SERIES_BARS};
+    if (!bars || typeof bars.size !== 'function') return null;
+    return bars.size();
+  })()
+`;
+
+/** Numeric bar count, or null when the bars path is unavailable. */
+async function readBarCount(evaluate) {
+  try {
+    const n = await evaluate(BAR_COUNT);
+    return Number.isFinite(n) ? n : null;
+  } catch {
+    return null;   // can't tell — callers must treat this as unknown, not "no bar"
+  }
+}
+
 /**
  * Is this bar still being written by the replay engine?
  *
@@ -249,6 +271,7 @@ export async function step({ _deps } = {}) {
   const started = await evaluate(wv(`${rp}.isReplayStarted()`));
   if (!started) throw new Error('Replay is not started. Use replay_start first.');
   const before = await evaluate(wv(`${rp}.currentDate()`));
+  const countBefore = await readBarCount(evaluate);
   await evaluate(`${rp}.doStep()`);
   // doStep() is async internally — currentDate takes ~500ms to update.
   // Poll until it changes or timeout after 3s.
@@ -265,7 +288,38 @@ export async function step({ _deps } = {}) {
   // bars.lastIndex(). Waiting here fixes it once for every caller.
   const { settled } = await waitForBarSettled(evaluate);
 
-  return { success: true, action: 'step', current_date: currentDate, bar_settled: settled };
+  // Did a bar actually appear?
+  //
+  // currentDate advancing is NOT evidence that it did. The replay cursor is just a
+  // date pointer, and doStep() moves it whether or not there is data at the new
+  // position — so once the cursor walks past the end of the chart's revealed bars,
+  // every subsequent step still returns a fresh, larger currentDate while the newest
+  // bar never changes. That is a silent stall: the caller sees success, an advancing
+  // date and a settled bar, and only notices something is wrong if it independently
+  // watches data_get_ohlcv's total_available sit still.
+  //
+  // Cost of not reporting it, observed live 2026-08-04: an autonomous practice session
+  // replaying 2025-11-05 walked off the edge at the 08:54 PT bar and kept "stepping"
+  // for three more calls. It was caught only because the agent noticed the bar count
+  // pinned at 366 by eye. Reported here, the stall is unmissable on the first step.
+  //
+  // null (not false) when either read failed — "cannot tell" must never be rendered as
+  // "no bar", or a missing bars path would fake a stall on a perfectly healthy replay.
+  const countAfter = countBefore === null ? null : await readBarCount(evaluate);
+  const barRevealed =
+    countBefore === null || countAfter === null ? null : countAfter > countBefore;
+
+  const result = {
+    success: true, action: 'step', current_date: currentDate,
+    bar_settled: settled, bar_revealed: barRevealed,
+  };
+  if (barRevealed === false) {
+    result.warning =
+      'Replay cursor advanced but NO new bar appeared — the chart has run out of ' +
+      `revealed bars (still ${countAfter}). Stepping further will not produce data. ` +
+      'Treat this as end-of-replay-data and stop the session.';
+  }
+  return result;
 }
 
 export async function autoplay({ speed, _deps } = {}) {

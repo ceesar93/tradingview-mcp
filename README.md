@@ -294,7 +294,7 @@ Read `line.new()`, `label.new()`, `table.new()`, `box.new()` output from any vis
 | Tool | Step |
 |------|------|
 | `replay_start` | Enter replay at a date. Auto-clears TradingView's "Continue your last replay?" modal (`replay_prompt_dismissed`); reports `current_date_confirmed` and, if it displaced a running replay, `replaced_existing_replay` / `previous_date` |
-| `replay_step` | Advance one bar |
+| `replay_step` | Advance one bar. Waits out the forming bar (`bar_settled`) and reports `bar_revealed:false` when the cursor advanced but no new bar appeared — the chart has run out of revealed bars and further stepping cannot produce data. `current_date` still advances in that case, so it is not evidence of progress; `bar_revealed:null` means the count could not be read (unknown, not a stall) |
 | `replay_autoplay` | Auto-advance (set speed in ms) |
 | `replay_trade` | Buy/sell/close positions |
 | `replay_status` | Check position, P&L, date |

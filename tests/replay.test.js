@@ -198,6 +198,102 @@ describe('step() — doStep and polling', () => {
   });
 });
 
+// ── step() — did a bar actually appear? ──────────────────────────────────
+//
+// The replay cursor is a date pointer: doStep() moves it whether or not data
+// exists at the new position. Once it walks past the end of the revealed bars,
+// every step still reports a fresh currentDate and a settled bar while nothing
+// new arrives. Live case 2026-08-04: a practice session replaying 2025-11-05
+// stalled at the 08:54 PT bar and kept "stepping" for three more calls, caught
+// only because a human noticed the bar count pinned at 366.
+//
+// A settled, non-forming bar is used throughout so waitForBarSettled resolves
+// immediately and these tests isolate the count comparison.
+const SETTLED_BAR = { time: 1, open: 1, high: 2, low: 0.5, close: 1.5, volume: 100 };
+
+/**
+ * @param {number[]} counts — bars.size() readings, consumed in call order.
+ *                            step() reads it once before doStep and once after.
+ */
+function steppingMock(counts) {
+  let stepped = false;
+  let idx = 0;
+  const evaluate = async (expr) => {
+    if (expr.includes('isReplayStarted')) return true;
+    if (expr.includes('doStep')) { stepped = true; return undefined; }
+    if (expr.includes('currentDate')) return stepped ? 2000 : 1000;
+    if (expr.includes('bars.size')) return counts[Math.min(idx++, counts.length - 1)];
+    if (expr.includes('valueAt')) return SETTLED_BAR;
+    return undefined;
+  };
+  evaluate.calls = [];
+  return { _deps: { evaluate, getReplayApi: mockGetReplayApi() } };
+}
+
+describe('step() — bar_revealed', () => {
+  it('reports bar_revealed true when the bar count grows', async () => {
+    const result = await step(steppingMock([366, 367]));
+    assert.equal(result.bar_revealed, true);
+    assert.equal(result.warning, undefined, 'a healthy step must not warn');
+  });
+
+  it('reports bar_revealed FALSE when the date advances but no bar appears', async () => {
+    const result = await step(steppingMock([366, 366]));
+    // The exact failure seen live: success, a fresh date, a settled bar, no data.
+    assert.equal(result.success, true);
+    assert.equal(result.current_date, 2000, 'cursor still advanced — that is the trap');
+    assert.equal(result.bar_settled, true);
+    assert.equal(result.bar_revealed, false);
+    assert.match(result.warning, /run out of/i);
+    assert.match(result.warning, /366/, 'warning should name the pinned count');
+  });
+
+  it('reports null — not false — when the bar count cannot be read', async () => {
+    // Rendering "cannot tell" as "no bar" would fake a stall on a healthy replay.
+    const evaluate = async (expr) => {
+      if (expr.includes('isReplayStarted')) return true;
+      if (expr.includes('doStep')) return undefined;
+      if (expr.includes('currentDate')) return 2000;
+      return undefined;   // bars path unavailable → size() read yields undefined
+    };
+    evaluate.calls = [];
+    const result = await step({ _deps: { evaluate, getReplayApi: mockGetReplayApi() } });
+    assert.equal(result.bar_revealed, null);
+    assert.equal(result.warning, undefined);
+  });
+
+  it('reports null when the bars path throws outright', async () => {
+    let stepped = false;
+    const evaluate = async (expr) => {
+      if (expr.includes('isReplayStarted')) return true;
+      if (expr.includes('doStep')) { stepped = true; return undefined; }
+      if (expr.includes('currentDate')) return stepped ? 2000 : 1000;
+      if (expr.includes('bars.size')) throw new Error('bars path unavailable');
+      return undefined;
+    };
+    evaluate.calls = [];
+    const result = await step({ _deps: { evaluate, getReplayApi: mockGetReplayApi() } });
+    assert.equal(result.bar_revealed, null, 'a throwing probe must not be read as a stall');
+    assert.equal(result.success, true, 'the step itself still succeeded');
+  });
+
+  it('does not probe the count a second time once the first read failed', async () => {
+    // Guards a wasted round-trip: if the path was unavailable before doStep it will
+    // still be unavailable after, and the answer is null either way.
+    let sizeReads = 0;
+    const evaluate = async (expr) => {
+      if (expr.includes('isReplayStarted')) return true;
+      if (expr.includes('doStep')) return undefined;
+      if (expr.includes('currentDate')) return 2000;
+      if (expr.includes('bars.size')) { sizeReads++; return null; }
+      return undefined;
+    };
+    evaluate.calls = [];
+    await step({ _deps: { evaluate, getReplayApi: mockGetReplayApi() } });
+    assert.equal(sizeReads, 1);
+  });
+});
+
 // ── start() — stale position / displacing a running replay ───────────────
 //
 // Regression for the 2026-07-26 incident: replay_start() on an ALREADY-RUNNING
@@ -267,10 +363,15 @@ describe('step() — waits out the forming bar', () => {
   function barMock(formingReads, settledBar) {
     let reads = 0;
     let stepped = false;
+    let count = 100;
     const fn = async (expr) => {
       if (expr.includes('isReplayStarted')) return true;
       if (expr.includes('doStep')) { stepped = true; return undefined; }
       if (expr.includes('currentDate')) return stepped ? 2000 : 1000;
+      // bars.size() must be matched BEFORE the generic mainSeries branch — the
+      // bar_revealed probe reads the same object path, and lumping the two together
+      // would make readCount() count count-probes as last-bar reads.
+      if (expr.includes('bars.size')) return stepped ? ++count : count;
       if (expr.includes('mainSeries')) {
         reads++;
         // Phase 1: flat OHLC + quarter volume.
