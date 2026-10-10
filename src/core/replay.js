@@ -9,10 +9,21 @@ function wv(path) {
   return `(function(){ var v = ${path}; return (v && typeof v === 'object' && typeof v.value === 'function') ? v.value() : v; })()`;
 }
 
+// 🔑 A LATE BAR IS NOT A STALL (2026-10-10). With two practice replays running at
+// once (OiOrjep9 + ylcHm2Dx), a stepped bar sometimes landed a second or two AFTER
+// the single reveal check. Both sessions were told "run out of revealed bars" on the
+// 04-15 replay, ~an hour into the day, and stopped -- yet re-reading the chart moments
+// later showed the bar had arrived, and the next step worked. So before declaring a
+// stall, keep re-reading the count for up to this long. A genuine end-of-history
+// still reports false, only this much later.
+const LATE_REVEAL_MS = 6000;
+const LATE_REVEAL_POLL_MS = 250;
+
 function _resolve(deps) {
   return {
     evaluate: deps?.evaluate || _evaluate,
     getReplayApi: deps?.getReplayApi || _getReplayApi,
+    lateRevealMs: Number.isFinite(deps?.lateRevealMs) ? deps.lateRevealMs : LATE_REVEAL_MS,
   };
 }
 
@@ -270,7 +281,7 @@ export async function start({ date, _deps } = {}) {
 }
 
 export async function step({ _deps } = {}) {
-  const { evaluate, getReplayApi } = _resolve(_deps);
+  const { evaluate, getReplayApi, lateRevealMs } = _resolve(_deps);
   const rp = await getReplayApi();
   const started = await evaluate(wv(`${rp}.isReplayStarted()`));
   if (!started) throw new Error('Replay is not started. Use replay_start first.');
@@ -309,7 +320,18 @@ export async function step({ _deps } = {}) {
   //
   // null (not false) when either read failed — "cannot tell" must never be rendered as
   // "no bar", or a missing bars path would fake a stall on a perfectly healthy replay.
-  const countAfter = countBefore === null ? null : await readBarCount(evaluate);
+  let countAfter = countBefore === null ? null : await readBarCount(evaluate);
+  let lateReveal = false;
+  if (countBefore !== null && countAfter !== null && countAfter <= countBefore) {
+    const deadline = Date.now() + lateRevealMs;
+    while (Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, LATE_REVEAL_POLL_MS));
+      const n = await readBarCount(evaluate);
+      if (n === null) { countAfter = null; break; }
+      countAfter = n;
+      if (countAfter > countBefore) { lateReveal = true; break; }
+    }
+  }
   const barRevealed =
     countBefore === null || countAfter === null ? null : countAfter > countBefore;
 
@@ -317,6 +339,7 @@ export async function step({ _deps } = {}) {
     success: true, action: 'step', current_date: currentDate,
     bar_settled: settled, bar_revealed: barRevealed,
   };
+  if (lateReveal) result.late_reveal = true;   // arrived after the first check
   if (barRevealed === false) {
     result.warning =
       'Replay cursor advanced but NO new bar appeared — the chart has run out of ' +

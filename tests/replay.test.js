@@ -227,10 +227,29 @@ function steppingMock(counts) {
     return undefined;
   };
   evaluate.calls = [];
-  return { _deps: { evaluate, getReplayApi: mockGetReplayApi() } };
+  return { _deps: { evaluate, getReplayApi: mockGetReplayApi(), lateRevealMs: 0 } };
 }
 
 describe('step() — bar_revealed', () => {
+  it('waits for a LATE bar instead of calling it a stall (2026-10-10)', async () => {
+    // Seen live with two replays at once: the count was still 320 at the first check
+    // and 321 a moment later. Reporting false there stopped two sessions an hour in.
+    const m = steppingMock([320, 320, 320, 321]);
+    m._deps.lateRevealMs = 3000;
+    const result = await step(m);
+    assert.equal(result.bar_revealed, true);
+    assert.equal(result.late_reveal, true);
+    assert.equal(result.warning, undefined);
+  });
+
+  it('still reports a genuine stall after the late-reveal wait', async () => {
+    const m = steppingMock([366, 366]);
+    m._deps.lateRevealMs = 600;
+    const result = await step(m);
+    assert.equal(result.bar_revealed, false);
+    assert.match(result.warning, /run out of/i);
+  });
+
   it('reports bar_revealed true when the bar count grows', async () => {
     const result = await step(steppingMock([366, 367]));
     assert.equal(result.bar_revealed, true);
