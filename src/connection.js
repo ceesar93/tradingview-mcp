@@ -189,6 +189,7 @@ export async function switchTarget(symbolFragment) {
     btc: '7SqnggXP',
     scanner: '3MBbQtHb',
     practice: 'OiOrjep9',
+    analyst: 'ylcHm2Dx',  // Data Analyst's own practice layout (2026-10-10) -- concurrent with OiOrjep9
   };
   const knownId = CHART_IDS[symbolFragment.toLowerCase()];
   if (knownId) {
