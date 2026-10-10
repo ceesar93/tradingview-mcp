@@ -118,14 +118,18 @@ export const DISMISS_REPLAY_PROMPT = `
     var dlg = null;
     for (var i = 0; i < nodes.length; i++) {
       var el = nodes[i];
-      if (el.offsetParent === null) continue; // not visible
+      // 🔴 NOT offsetParent (fixed 2026-10-10). The prompt is a position:fixed
+      // dialog, and offsetParent is ALWAYS null for a fixed element, so the old
+      // test skipped the one node it was looking for and replay_start returned
+      // replay_prompt_dismissed:false with the prompt still on screen.
+      if (!el.getClientRects().length) continue; // not rendered
       var txt = (el.textContent || '').toLowerCase();
       if (txt.indexOf(NEEDLE) === -1) continue;
       if (!dlg || (el.textContent || '').length < (dlg.textContent || '').length) dlg = el;
     }
     if (!dlg) return { found: false, clicked: false };
 
-    function visible(b) { return b && b.offsetParent !== null; }
+    function visible(b) { return !!b && b.getClientRects().length > 0; }
     var btn = null, via = null;
 
     // Prefer the close (X) control: it dismisses without ANSWERING the question, so it

@@ -432,7 +432,7 @@ describe('start() — dismisses the "Continue your last replay?" prompt', () => 
   const PROMPT_TEXT = 'Continue your last replay?';
 
   function makeButton(label, kind) {
-    const b = { textContent: label, offsetParent: {}, kind, clicked: 0 };
+    const b = { textContent: label, offsetParent: {}, getClientRects: () => [{}], kind, clicked: 0 };
     b.click = () => { b.clicked++; };
     return b;
   }
@@ -442,6 +442,8 @@ describe('start() — dismisses the "Continue your last replay?" prompt', () => 
     return {
       textContent: text,
       offsetParent: {},
+      rendered: true,
+      getClientRects() { return this.rendered ? [{}] : []; },
       querySelectorAll(sel) {
         // Close X's are <button> too, so they appear in both lists — as in the real DOM.
         return sel === 'button' ? buttons : buttons.filter(b => b.kind === 'close');
@@ -489,9 +491,23 @@ describe('start() — dismisses the "Continue your last replay?" prompt', () => 
     assert.equal(outer.clicked, 0, 'clicking the shell would hit an unrelated control');
   });
 
+  it('finds a position:fixed prompt, whose offsetParent is always null', async () => {
+    // Regression, 2026-10-10: the real prompt is a fixed dialog. offsetParent is null
+    // for EVERY fixed element, so the old visibility test skipped it, and replay_start
+    // reported replay_prompt_dismissed:false with the prompt still covering the chart.
+    const close = makeButton('', 'close');
+    const fixed = makeDialog(PROMPT_TEXT, [close, makeButton('Continue', 'button')]);
+    fixed.offsetParent = null;
+    close.offsetParent = null;
+    const r = runDismiss([fixed]);
+    assert.equal(r.found, true);
+    assert.equal(r.via, 'close');
+    assert.equal(close.clicked, 1);
+  });
+
   it('ignores an invisible prompt and a dialog that is something else', async () => {
     const hidden = makeDialog(PROMPT_TEXT, [makeButton('Continue', 'button')]);
-    hidden.offsetParent = null;
+    hidden.rendered = false;
     const unrelated = makeDialog('Are you sure you want to delete this alert?', [
       makeButton('Delete', 'button'),
     ]);
