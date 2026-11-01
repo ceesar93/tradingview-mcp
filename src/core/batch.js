@@ -9,7 +9,7 @@ import { fileURLToPath } from 'url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // Moved 2026-07-16 — see capture.js for the full note.
-const SCREENSHOT_DIR = join(process.env.HOME, 'Documents', 'Trading', 'screenshots');
+const SCREENSHOT_DIR = join(process.env.HOME, 'Projects', 'Trading', 'screenshots');
 
 export async function batchRun({ symbols, timeframes, action, delay_ms, ohlcv_count }) {
   const tfs = timeframes && timeframes.length > 0 ? timeframes : [null];

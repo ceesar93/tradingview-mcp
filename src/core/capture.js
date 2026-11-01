@@ -10,7 +10,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 // Moved 2026-07-16 from this repo's own screenshots/ dir into the Trading
 // repo, so screenshots live alongside data/, logs/, etc. instead of a
 // separate tool directory.
-const SCREENSHOT_DIR = join(process.env.HOME, 'Documents', 'Trading', 'screenshots');
+const SCREENSHOT_DIR = join(process.env.HOME, 'Projects', 'Trading', 'screenshots');
 
 export async function captureScreenshot({ region, filename, method } = {}) {
   mkdirSync(SCREENSHOT_DIR, { recursive: true });
