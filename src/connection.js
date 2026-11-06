@@ -271,6 +271,13 @@ export async function getBottomBar() {
 }
 
 export async function getReplayApi() {
+  // TradingView now builds _replayApi lazily: it stays null until the async
+  // TradingViewApi.replayApi() is called once. Call it first so the path exists.
+  try {
+    await evaluateAsync(
+      `(async () => { const a = window.TradingViewApi; if (a && a._replayApi === null && typeof a.replayApi === 'function') { await a.replayApi(); } return true; })()`
+    );
+  } catch (e) { /* fall through to the normal check and its error */ }
   return verifyAndReturn(KNOWN_PATHS.replayApi, 'Replay API');
 }
 
